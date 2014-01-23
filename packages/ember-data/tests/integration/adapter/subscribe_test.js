@@ -36,6 +36,11 @@ var  PEOPLE_FIXTURES= {
   2: { id: 2, firstName: 'mhaaaarb' }
 };
 
+DS.Adapter.reopen({
+  subscribe: Ember.K,
+  unsubscribe: Ember.K
+});
+
 var Adapter = DS.Adapter.extend({
   init: function(){
     this._super();
