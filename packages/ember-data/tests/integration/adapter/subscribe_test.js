@@ -2,6 +2,35 @@ var get = Ember.get, set = Ember.set;
 var Person, Company, store, adapter, container;
 var Promise = Ember.RSVP.Promise;
 
+function setupStore(options) {
+  var env = {};
+  options = options || {};
+
+  var container = env.container = new Ember.Container();
+
+  var adapter = env.adapter = (options.adapter || DS.Adapter);
+  delete options.adapter;
+
+  for (var prop in options) {
+    container.register('model:' + prop, options[prop]);
+  }
+
+  container.register('store:main', DS.Store.extend({
+    adapter: adapter
+  }));
+
+  container.register('serializer:-default', DS.JSONSerializer);
+  container.register('serializer:-rest', DS.RESTSerializer);
+  container.register('adapter:-rest', DS.RESTAdapter);
+
+  container.injection('serializer', 'store', 'store:main');
+
+  env.serializer = container.lookup('serializer:-default');
+  env.store = container.lookup('store:main');
+
+  return env;
+}
+
 var  PEOPLE_FIXTURES= {
   1: { id: 1, firstName: 'Braaaahm' },
   2: { id: 2, firstName: 'mhaaaarb' }
@@ -29,10 +58,10 @@ var Adapter = DS.Adapter.extend({
       store.pushPayload(type, payload);
     });
   },
-  unsubscribe: function(store, record) {
+  unsubscribe: function(store, record, opts) {
     var type = record.constructor.typeKey;
     var service = this.serviceFor(type);
-    service.unsubscribe(type, record.get('id'));
+    service.unsubscribe(type, record.get('id'), opts);
   },
   serviceFor: function(type) {
     var service = this._services[type];
@@ -45,21 +74,33 @@ var Adapter = DS.Adapter.extend({
 });
 
 var mockService = Ember.Object.createWithMixins(Ember.Evented, {
-  init: function(){ 
-    this._subscribers = 0;
+  init: function(){
+    this._subscribers = Ember.Object.create();
     this._super();
   },
   update: function(type, payload) {
     this.trigger('update', type, payload);
   },
   subscribe: function(type, id, callback){
-    this.incrementProperty(type + id);
+    this._subscribers.incrementProperty(type + id);
     this.on('update', callback);
   },
-  unsubscribe: function(type, id){
-    if (!this.decrementProperty(type + id)) { return; }
-
-    this.off('update');
+  unsubscribe: function(type, id, opts){
+    if (opts && opts.force) {
+       this._subscribers.set(type + id, 0);
+    } else {
+      var subscriberCount = this._subscribers.decrementProperty(type + id);
+      Ember.assert("attempted to unsubscribe from " + type + ', ' + id + ' but it was not subscribed', subscriberCount >= 0);
+      if (subscriberCount <= 0) {
+       this._subscribers.set(type + id, 0);
+      }
+    }
+    if (this._subscribers.get([type+id]) === 0) {
+       // TODO: turn off polling
+    }
+  },
+  isSubscribedTo: function(type, id) {
+    return this._subscribers[type + id] > 0;
   }
 });
 
@@ -67,8 +108,12 @@ DS.Model.reopen({
   subscribe: function(){
     return this.get('store').subscribe(this);
   },
-  unsubscribe: function(){
-    return this.get('store').unsubscribe(this);
+  unsubscribe: function(opts){
+    return this.get('store').unsubscribe(this, opts);
+  },
+  willDestroy: function() {
+    this.unsubscribe({ force: true });
+    this._super();
   }
 });
 
@@ -76,8 +121,12 @@ DS.Store.reopen({
   subscribe: function(record){
     return this.adapterFor(record).subscribe(this, record);
   },
-  unsubscribe: function(record){
-    return this.adapterFor(record).unsubscribe(this, record);
+  unsubscribe: function(record, opts){
+    return this.adapterFor(record).unsubscribe(this, record, opts);
+  },
+  dematerializeRecord: function(record) {
+    this.unsubscribe(record, { force: true });
+    this._super(record);
   }
 });
 
@@ -100,7 +149,7 @@ module('integration/adapter/subscribe - Finding and Subscribing to Records', {
 });
 
 test("When a single record is requested, the adapter's find method should be called unless it='s loaded.", function() {
-  expect(6);
+  expect(12);
 
   var env = setupStore({
     person: Person,
@@ -127,7 +176,8 @@ test("When a single record is requested, the adapter's find method should be cal
     return person1.subscribe();
   }).then(function(){
     Ember.run(function(){ mockService.update('person', { people: [ {id: 1, firstName: 'Yolo'} ]} ); });
-
+    equal(mockService.isSubscribedTo('person', 1), true, "person1: should be subscribed to");
+    equal(mockService.isSubscribedTo('person', 2), false, "person2: should NOT subscribed to");
     equal(get(person1, 'firstName'), 'Yolo',     'person1: firstName should be updated');
     equal(get(person2, 'firstName'), 'mhaaaarb', 'person2: firstName should NOT be updated');
 
@@ -138,8 +188,19 @@ test("When a single record is requested, the adapter's find method should be cal
     ]);
   }).then(function(){
     Ember.run(function(){ mockService.update('person', { people: [{ id: 2, firstName: 'Abba'} ]}); });
+    equal(mockService.isSubscribedTo('person', 1), false, "person1: should NOT be subscribed to");
+    equal(mockService.isSubscribedTo('person', 2), true, "person2: should be subscribed to");
 
     equal(get(person1, 'firstName'), 'Yolo', 'person1: firstName should NOT be updated');
     equal(get(person2, 'firstName'), 'Abba', 'person2: firstName should be updated');
+  }).then(function(){
+    return person1.subscribe();
+  }).then(function(){
+    Ember.run(function(){
+      person1.unloadRecord();
+      person2.destroy();
+    });
+    equal(mockService.isSubscribedTo('person', 1), false, "person1: should NOT be subscribed to");
+    equal(mockService.isSubscribedTo('person', 2), false, "person2: should NOT be subscribed to");
   })['finally'](start);
 });
