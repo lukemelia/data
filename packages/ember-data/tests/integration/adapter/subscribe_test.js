@@ -1,5 +1,11 @@
 var get = Ember.get, set = Ember.set;
 var Person, Company, store, adapter, container;
+var Promise = Ember.RSVP.Promise;
+
+var  PEOPLE_FIXTURES= {
+  1: { id: 1, firstName: 'Braaaahm' },
+  2: { id: 2, firstName: 'mhaaaarb' }
+};
 
 var Adapter = DS.Adapter.extend({
   init: function(){
@@ -12,7 +18,9 @@ var Adapter = DS.Adapter.extend({
     this.service = null;
   },
   find: function(store, type, id) {
-    return { people: [{ id: 1, firstName: "Braaaahm" }] };
+    return {
+      people: PEOPLE_FIXTURES[id]
+    };
   },
   subscribe: function(store, record) {
     var type = record.constructor.typeKey;
@@ -37,13 +45,20 @@ var Adapter = DS.Adapter.extend({
 });
 
 var mockService = Ember.Object.createWithMixins(Ember.Evented, {
+  init: function(){ 
+    this._subscribers = 0;
+    this._super();
+  },
   update: function(type, payload) {
     this.trigger('update', type, payload);
   },
   subscribe: function(type, id, callback){
+    this.incrementProperty(type + id);
     this.on('update', callback);
   },
   unsubscribe: function(type, id){
+    if (!this.decrementProperty(type + id)) { return; }
+
     this.off('update');
   }
 });
@@ -66,7 +81,7 @@ DS.Store.reopen({
   }
 });
 
-module("integration/adapter/subscribe - Finding and Subscribing to Records", {
+module('integration/adapter/subscribe - Finding and Subscribing to Records', {
   setup: function() {
     Person = DS.Model.extend({
       typeKey: 'person', // TODO deal with this
@@ -84,8 +99,8 @@ module("integration/adapter/subscribe - Finding and Subscribing to Records", {
   }
 });
 
-test("When a single record is requested, the adapter's find method should be called unless it's loaded.", function() {
-  expect(3);
+test("When a single record is requested, the adapter's find method should be called unless it='s loaded.", function() {
+  expect(6);
 
   var env = setupStore({
     person: Person,
@@ -96,18 +111,35 @@ test("When a single record is requested, the adapter's find method should be cal
   store = env.store;
   stop();
 
-  var person;
-  store.find('person', 1).then(function(p){
-    person = p;
-    equal(get(person, 'firstName'), 'Braaaahm', "firstName should be set");
-    return person.subscribe();
+  var person1, person2, people;
+
+  Ember.RSVP.hash({
+    person1: store.find('person', 1),
+    person2: store.find('person', 2)
+  }).then(function(people){
+
+    person1 = people.person1;
+    person2 = people.person2;
+
+    equal(get(person1, 'firstName'), 'Braaaahm', 'person1: firstName should be set');
+    equal(get(person2, 'firstName'), 'mhaaaarb', 'person2: firstName should be set');
+
+    return person1.subscribe();
   }).then(function(){
     Ember.run(function(){ mockService.update('person', { people: [ {id: 1, firstName: 'Yolo'} ]} ); });
-    equal(get(person, 'firstName'), 'Yolo', "firstName should be updated");
+
+    equal(get(person1, 'firstName'), 'Yolo',     'person1: firstName should be updated');
+    equal(get(person2, 'firstName'), 'mhaaaarb', 'person2: firstName should NOT be updated');
+
   }).then(function(){
-    return person.unsubscribe();
+    return Promise.all([
+      person2.subscribe(),
+      person1.unsubscribe()
+    ]);
   }).then(function(){
-    Ember.run(function(){ mockService.update('person', { people: [{ id: 1, firstName: 'Baba'} ]}); });
-    equal(get(person, 'firstName'), 'Yolo', "firstName should not be updated");
-  }).then(start, start);
+    Ember.run(function(){ mockService.update('person', { people: [{ id: 2, firstName: 'Abba'} ]}); });
+
+    equal(get(person1, 'firstName'), 'Yolo', 'person1: firstName should NOT be updated');
+    equal(get(person2, 'firstName'), 'Abba', 'person2: firstName should be updated');
+  })['finally'](start);
 });
